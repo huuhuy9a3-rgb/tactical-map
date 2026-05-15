@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import CameraTab from "./components/tabs/camera/CameraTab";
 import ObjectTab from "./components/tabs/object/ObjectTab";
 import SimTab from "./components/tabs/simulate/SimTab";
-import { pauseAll, simStateMap } from "./components/tabs/simulate/Gpstab ";
+import { pauseAll, simStateMap } from "./components/tabs/simulate/Gpstab";
 
 const TABS = ["CAMERA", "OBJECT", "SIM"];
 
@@ -147,6 +147,8 @@ export default function ControlPanel({
             objects={objects}
             selectedId={selectedId}
             setSelectedId={setSelectedId}
+            camLat={camLat}
+            camLon={camLon}
           />
         </div>
       </div>

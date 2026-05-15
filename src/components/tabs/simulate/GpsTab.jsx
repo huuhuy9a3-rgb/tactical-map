@@ -97,6 +97,7 @@ export default function GpsTab({
   onRotateObject,
   onDrawPath,
   onClearPath,
+  stopDest,
 }) {
   const id = selected?.id;
   const [, forceUpdate] = useState(0);
@@ -195,6 +196,7 @@ export default function GpsTab({
 
   const handleStartSim = () => {
     if (!selected) return alert("Chọn object trước!");
+    stopDest?.(selected.id);
     let rawPath;
     try {
       rawPath = JSON.parse(state.simPath);

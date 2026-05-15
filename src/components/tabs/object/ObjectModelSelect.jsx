@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 
 export const DEFAULT_MODELS = [
   { label: "Arrow", uri: "/models/arrow.glb" },
+  { label: "Jet Fighter", uri: "/models/jet_fighter.glb" },
   { label: "Duck", uri: "/models/duck.glb" },
   { label: "Cube", uri: "/models/cube.glb" },
   { label: "Sphere", uri: "/models/sphere.glb" },

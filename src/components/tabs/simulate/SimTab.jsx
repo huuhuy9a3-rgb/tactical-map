@@ -1,9 +1,19 @@
-import { useEffect, useState } from "react";
-import GpsTab, { pauseAll, simStateMap } from "./Gpstab ";
-import DestinationTab from "./DestinationTab ";
+import { useState, useRef, useEffect } from "react";
+import GpsTab, { pauseAll, simStateMap } from "./GpsTab";
+import DestinationTab from "./DestinationTab";
 
 const ITEM_HEIGHT = 39;
 const MAX_VISIBLE = 5;
+
+// State mặc định cho mỗi object
+const defaultDestState = () => ({
+  destLat: "",
+  destLon: "",
+  destAlt: "10",
+  phase: "idle",
+  stepIndex: 0,
+  totalSteps: 0,
+});
 
 export default function SimTab({
   onSimulate,
@@ -14,13 +24,131 @@ export default function SimTab({
   objects,
   selectedId,
   setSelectedId,
+  camLat,
+  camLon,
+  pauseRef,
 }) {
   const [activeSection, setActiveSection] = useState("gps");
   const selected = objects?.find((o) => o.id === selectedId);
 
+  // ── State map theo objectId ──────────────────────────────
+  const [destStateMap, setDestStateMap] = useState({});
+
+  // Ref map theo objectId
+  const destIntervalRefs = useRef({});
+  const destIndexRefs = useRef({});
+  const destPathRefs = useRef({});
+
+  // Lấy state của object hiện tại (hoặc default)
+  const currentState =
+    selectedId && destStateMap[selectedId]
+      ? destStateMap[selectedId]
+      : defaultDestState();
+
+  // Setter cho từng field của object hiện tại
+  const patchState = (patch) => {
+    if (!selectedId) return;
+    setDestStateMap((prev) => ({
+      ...prev,
+      [selectedId]: {
+        ...(prev[selectedId] ?? defaultDestState()),
+        ...patch,
+      },
+    }));
+  };
+
+  // Getter ref theo objectId (tự tạo nếu chưa có)
+  const getIntervalRef = (id) => {
+    if (!destIntervalRefs.current[id])
+      destIntervalRefs.current[id] = { current: null };
+    return destIntervalRefs.current[id];
+  };
+  const getIndexRef = (id) => {
+    if (!destIndexRefs.current[id]) destIndexRefs.current[id] = { current: 0 };
+    return destIndexRefs.current[id];
+  };
+  const getPathRef = (id) => {
+    if (!destPathRefs.current[id]) destPathRefs.current[id] = { current: [] };
+    return destPathRefs.current[id];
+  };
+
+  // ── Pause tất cả ────────────────────────────────────────
+  const pauseEverything = () => {
+    // Pause tất cả destination interval đang chạy
+    Object.keys(destIntervalRefs.current).forEach((id) => {
+      const ref = destIntervalRefs.current[id];
+      if (ref?.current) {
+        clearInterval(ref.current);
+        ref.current = null;
+        setDestStateMap((prev) => {
+          if (prev[id]?.phase === "running") {
+            return { ...prev, [id]: { ...prev[id], phase: "paused" } };
+          }
+          return prev;
+        });
+      }
+    });
+    pauseAll();
+  };
+
+  // ── Expose ra ngoài qua pauseRef ────────────────────────
+  useEffect(() => {
+    if (pauseRef) pauseRef.current = pauseEverything;
+  });
+
+  // ── Chuyển section ───────────────────────────────────────
   const handleSetSection = (s) => {
-    if (s === "destination") pauseAll();
+    pauseEverything();
     setActiveSection(s);
+  };
+
+  const stopGpsForObject = (id) => {
+    pauseAll(); // dừng interval GPS
+    onClearPath?.(id); // xóa path trên bản đồ
+
+    // ← Đưa object về vị trí ban đầu trước khi xóa origin
+    const gpsState = simStateMap[id];
+    if (gpsState?.origin) {
+      onMoveObject?.({ id, ...gpsState.origin });
+      onRotateObject?.({ id, heading: 0, pitch: 0, roll: 0 });
+    }
+
+    // Reset simStateMap về idle
+    if (simStateMap[id]) {
+      simStateMap[id].status = "idle";
+      simStateMap[id].stepIndex = 0;
+      simStateMap[id].path = [];
+      simStateMap[id].origin = null;
+    }
+  };
+
+  const stopDestForObject = (id) => {
+    const ref = getIntervalRef(id);
+    if (ref.current) {
+      clearInterval(ref.current);
+      ref.current = null;
+    }
+
+    // ← Đưa object về điểm đầu path Destination
+    const p = getPathRef(id).current;
+    if (p?.length > 0) {
+      onMoveObject?.({ id, ...p[0] });
+      onRotateObject?.({ id, heading: p[0].heading ?? 0, pitch: 0, roll: 0 });
+    }
+
+    getPathRef(id).current = [];
+    getIndexRef(id).current = 0;
+    onClearPath?.(id);
+
+    setDestStateMap((prev) => ({
+      ...prev,
+      [id]: {
+        ...(prev[id] ?? defaultDestState()),
+        phase: "idle",
+        stepIndex: 0,
+        totalSteps: 0,
+      },
+    }));
   };
 
   return (
@@ -123,19 +251,65 @@ export default function SimTab({
         ))}
       </div>
 
-      {/* Tab content */}
-      {activeSection === "gps" && (
+      {/* GPS */}
+      <div style={{ display: activeSection === "gps" ? "block" : "none" }}>
         <GpsTab
           selected={selected}
           onMoveObject={onMoveObject}
           onRotateObject={onRotateObject}
           onDrawPath={onDrawPath}
           onClearPath={onClearPath}
+          stopDest={stopDestForObject}
         />
-      )}
-      {activeSection === "destination" && (
-        <DestinationTab selected={selected} onSimulate={onSimulate} />
-      )}
+      </div>
+
+      {/* DESTINATION — render theo selectedId để reset đúng ref */}
+      <div
+        style={{ display: activeSection === "destination" ? "block" : "none" }}
+      >
+        {selectedId ? (
+          <DestinationTab
+            key={selectedId}
+            selected={selected}
+            onMoveObject={onMoveObject}
+            onRotateObject={onRotateObject}
+            onDrawPath={onDrawPath}
+            onClearPath={onClearPath}
+            camLat={camLat}
+            camLon={camLon}
+            // per-object state
+            destLat={currentState.destLat}
+            setDestLat={(v) => patchState({ destLat: v })}
+            destLon={currentState.destLon}
+            setDestLon={(v) => patchState({ destLon: v })}
+            destAlt={currentState.destAlt}
+            setDestAlt={(v) => patchState({ destAlt: v })}
+            phase={currentState.phase}
+            setPhase={(v) => patchState({ phase: v })}
+            stepIndex={currentState.stepIndex}
+            setStepIndex={(v) => patchState({ stepIndex: v })}
+            totalSteps={currentState.totalSteps}
+            setTotalSteps={(v) => patchState({ totalSteps: v })}
+            intervalRef={getIntervalRef(selectedId)}
+            indexRef={getIndexRef(selectedId)}
+            pathRef={getPathRef(selectedId)}
+            stopGps={stopGpsForObject}
+          />
+        ) : (
+          <div
+            style={{
+              fontSize: 10,
+              color: "#ffffff33",
+              textAlign: "center",
+              padding: "16px 0",
+              border: "1px solid #ffffff11",
+              borderRadius: 4,
+            }}
+          >
+            Chọn object để bắt đầu
+          </div>
+        )}
+      </div>
     </>
   );
 }
