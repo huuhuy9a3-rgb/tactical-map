@@ -44,7 +44,7 @@ function calcHeading(lat1, lon1, lat2, lon2) {
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 
-// ── OSRM fetch ───────────────────────────────────────────
+// ── OSRM fetch (road) ────────────────────────────────────
 async function fetchRoadPath(startLat, startLon, endLat, endLon, alt = 10) {
   const url =
     `https://router.project-osrm.org/route/v1/driving/` +
@@ -65,6 +65,38 @@ async function fetchRoadPath(startLat, startLon, endLat, endLon, alt = 10) {
     return { lat, lon, alt: parseFloat(alt), heading };
   });
   return simplifyPath(raw, 50);
+}
+
+// ── Aerial path (straight line, interpolated) ────────────
+// Nội suy N bước từ điểm A → B theo đường thẳng trên không.
+// Altitude có thể climb lên đỉnh rồi descend (arc) hoặc giữ flat.
+function buildAerialPath(
+  startLat,
+  startLon,
+  startAlt,
+  endLat,
+  endLon,
+  endAlt,
+  steps = 20,
+  arcHeight = 0, // độ cao cộng thêm ở điểm giữa (arc)
+) {
+  const heading = calcHeading(startLat, startLon, endLat, endLon);
+  const path = [];
+
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const lat = startLat + (endLat - startLat) * t;
+    const lon = startLon + (endLon - startLon) * t;
+
+    // Alt: linear blend + optional parabolic arc
+    const baseAlt = startAlt + (endAlt - startAlt) * t;
+    const arc = arcHeight * 4 * t * (1 - t); // đỉnh ở t=0.5
+    const alt = baseAlt + arc;
+
+    path.push({ lat, lon, alt, heading });
+  }
+
+  return path;
 }
 
 // ── Styles ───────────────────────────────────────────────
@@ -134,10 +166,19 @@ export default function DestinationTab({
 }) {
   const [loading, setLoading] = useState(false);
 
+  // ── Chế độ bay ──────────────────────────────────────────
+  const [flightMode, setFlightMode] = useState("road"); // "road" | "aerial"
+  const [aerialSteps, setAerialSteps] = useState("30");
+  const [arcHeight, setArcHeight] = useState("0");
+
+  // ── Bước nhảy mỗi lần PREV / NEXT ───────────────────────
+  const [jumpSize, setJumpSize] = useState("1");
+
   const isIdle = phase === "idle";
   const atStart = stepIndex === 0;
   const atEnd = stepIndex >= totalSteps - 1;
   const displayStep = Math.min(stepIndex + 1, totalSteps);
+  const showJumpSize = totalSteps >= 20;
 
   // ── Dùng vị trí camera ──────────────────────────────────
   const handleUseCameraPos = () => {
@@ -152,13 +193,31 @@ export default function DestinationTab({
     stopGps?.(selected.id);
     setLoading(true);
     try {
-      const p = await fetchRoadPath(
-        parseFloat(selected.lat),
-        parseFloat(selected.lon),
-        parseFloat(destLat),
-        parseFloat(destLon),
-        destAlt,
-      );
+      let p;
+
+      if (flightMode === "aerial") {
+        // Đường thẳng trên không — không cần API
+        p = buildAerialPath(
+          parseFloat(selected.lat),
+          parseFloat(selected.lon),
+          parseFloat(selected.alt) || 100,
+          parseFloat(destLat),
+          parseFloat(destLon),
+          parseFloat(destAlt) || 100,
+          Math.max(2, parseInt(aerialSteps) || 30),
+          parseFloat(arcHeight) || 0,
+        );
+      } else {
+        // Đường bộ qua OSRM
+        p = await fetchRoadPath(
+          parseFloat(selected.lat),
+          parseFloat(selected.lon),
+          parseFloat(destLat),
+          parseFloat(destLon),
+          destAlt,
+        );
+      }
+
       pathRef.current = p;
       indexRef.current = 0;
       setStepIndex(0);
@@ -173,7 +232,7 @@ export default function DestinationTab({
       });
       setPhase("ready");
     } catch (e) {
-      alert(e.message || "Lỗi khi tìm đường!");
+      alert(e.message || "Lỗi khi tính đường!");
     } finally {
       setLoading(false);
     }
@@ -249,6 +308,8 @@ export default function DestinationTab({
     });
   };
 
+  const getJumpSize = () => Math.max(1, parseInt(jumpSize) || 1);
+
   // ── Reset ────────────────────────────────────────────────
   const handleReset = () => {
     clearInterval(intervalRef.current);
@@ -275,6 +336,7 @@ export default function DestinationTab({
     onClearPath?.(selected?.id);
     pathRef.current = [];
     indexRef.current = 0;
+    setJumpSize("1");
     setStepIndex(0);
     setTotalSteps(0);
     setPhase("idle");
@@ -282,16 +344,95 @@ export default function DestinationTab({
 
   return (
     <>
-      <div
-        style={{
-          fontSize: 9,
-          color: "#ffffff33",
-          marginBottom: 10,
-          lineHeight: 1.6,
-        }}
-      >
-        Tìm đường bộ từ object → điểm đến (OSRM)
+      {/* ── Flight mode toggle ─────────────────────────────── */}
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ ...lbl, marginBottom: 6 }}>CHẾ ĐỘ DI CHUYỂN</div>
+        <div style={{ display: "flex", gap: 4 }}>
+          {[
+            { key: "road", label: "🚗 ROAD", color: "#00ff88" },
+            { key: "aerial", label: "✈ AERIAL", color: "#00ccff" },
+          ].map(({ key, label, color }) => (
+            <button
+              key={key}
+              disabled={!isIdle}
+              onClick={() => isIdle && setFlightMode(key)}
+              style={{
+                flex: 1,
+                padding: "6px 0",
+                borderRadius: 4,
+                fontFamily: "Courier New",
+                fontSize: 10,
+                letterSpacing: 1,
+                cursor: isIdle ? "pointer" : "not-allowed",
+                border: `1px solid ${flightMode === key ? color : color + "33"}`,
+                color: flightMode === key ? color : color + "55",
+                background: flightMode === key ? `${color}18` : "transparent",
+                transition: "all 0.2s",
+                opacity: !isIdle ? 0.5 : 1,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Mô tả mode */}
+        <div
+          style={{
+            fontSize: 9,
+            color: "#ffffff33",
+            marginTop: 5,
+            lineHeight: 1.6,
+          }}
+        >
+          {flightMode === "road"
+            ? "Tìm đường bộ thực tế qua OSRM"
+            : "Bay thẳng trên không theo đường nội suy"}
+        </div>
       </div>
+
+      {/* ── Aerial-only params ─────────────────────────────── */}
+      {flightMode === "aerial" && isIdle && (
+        <div
+          style={{
+            background: "#00ccff08",
+            border: "1px solid #00ccff22",
+            borderRadius: 4,
+            padding: "8px 10px",
+            marginBottom: 10,
+          }}
+        >
+          <div style={{ ...lbl, color: "#00ccffaa", marginBottom: 6 }}>
+            CẤU HÌNH AERIAL
+          </div>
+
+          <div style={lbl}>Số bước nội suy</div>
+          <input
+            type="number"
+            value={aerialSteps}
+            min={2}
+            max={500}
+            step={1}
+            onChange={(e) => setAerialSteps(e.target.value)}
+            style={{ ...inputStyle("#00ccff"), marginBottom: 8 }}
+          />
+
+          <div style={lbl}>Arc height (m) — độ cao đỉnh cung</div>
+          <input
+            type="number"
+            value={arcHeight}
+            min={0}
+            step={10}
+            onChange={(e) => setArcHeight(e.target.value)}
+            style={{ ...inputStyle("#00ccff"), marginBottom: 0 }}
+          />
+          <div style={{ fontSize: 9, color: "#ffffff22", marginTop: 3 }}>
+            0 = bay phẳng · &gt;0 = bay vòng cung lên cao rồi xuống
+          </div>
+        </div>
+      )}
+
+      <div style={{ borderTop: "1px solid #ffffff0d", marginBottom: 10 }} />
 
       {/* XUẤT PHÁT */}
       <div style={lbl}>XUẤT PHÁT (từ object)</div>
@@ -343,7 +484,7 @@ export default function DestinationTab({
         style={inputStyle(!isIdle ? "#ffffff33" : "#ffcc00", !isIdle)}
       />
 
-      <div style={lbl}>ĐỘ CAO (m)</div>
+      <div style={lbl}>ĐỘ CAO ĐIỂM ĐẾN (m)</div>
       <input
         type="number"
         value={destAlt}
@@ -356,11 +497,18 @@ export default function DestinationTab({
       {/* ── IDLE ── */}
       {isIdle && (
         <button
-          style={mkBtn("#00ff88", !selected || loading)}
+          style={mkBtn(
+            flightMode === "aerial" ? "#00ccff" : "#00ff88",
+            !selected || loading,
+          )}
           onClick={handleCalc}
           disabled={!selected || loading}
         >
-          {loading ? "⏳ ĐANG TÍNH ĐƯỜNG..." : "⬡ TÍNH TOÁN QUÃNG ĐƯỜNG"}
+          {loading
+            ? "⏳ ĐANG TÍNH..."
+            : flightMode === "aerial"
+              ? "✈ TÍNH ĐƯỜNG BAY"
+              : "⬡ TÍNH TOÁN QUÃNG ĐƯỜNG"}
         </button>
       )}
 
@@ -380,6 +528,66 @@ export default function DestinationTab({
           >
             STEP {displayStep} / {totalSteps}
           </div>
+
+          {/* Jump size — chỉ hiện khi tổng step >= 20 */}
+          {showJumpSize && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                background: "#ffffff06",
+                border: "1px solid #ffffff11",
+                borderRadius: 4,
+                padding: "5px 8px",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 9,
+                  color: "#ffffff44",
+                  whiteSpace: "nowrap",
+                  letterSpacing: 1,
+                }}
+              >
+                BƯỚC NHẢY
+              </div>
+              <input
+                type="number"
+                value={jumpSize}
+                min={1}
+                max={totalSteps}
+                step={1}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value);
+                  if (!isNaN(v) && v >= 1) setJumpSize(String(v));
+                  else if (e.target.value === "") setJumpSize("1");
+                }}
+                style={{
+                  flex: 1,
+                  background: "#0d1a2a",
+                  border: "1px solid #00ccff44",
+                  borderRadius: 3,
+                  color: "#00ccff",
+                  padding: "3px 6px",
+                  fontFamily: "Courier New",
+                  fontSize: 11,
+                  outline: "none",
+                  textAlign: "center",
+                  minWidth: 0,
+                }}
+              />
+              <div
+                style={{
+                  fontSize: 9,
+                  color: "#ffffff33",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                / {totalSteps}
+              </div>
+            </div>
+          )}
 
           {/* Row 1: Primary action */}
           <div style={{ display: "flex", gap: 6 }}>
@@ -409,14 +617,14 @@ export default function DestinationTab({
           <div style={{ display: "flex", gap: 6 }}>
             <button
               style={mkBtn("#00ccff", atStart)}
-              onClick={() => jumpTo(indexRef.current - 1)}
+              onClick={() => jumpTo(indexRef.current - getJumpSize())}
               disabled={atStart}
             >
               ◀ PREV
             </button>
             <button
               style={mkBtn("#00ccff", atEnd)}
-              onClick={() => jumpTo(indexRef.current + 1)}
+              onClick={() => jumpTo(indexRef.current + getJumpSize())}
               disabled={atEnd}
             >
               NEXT ▶
